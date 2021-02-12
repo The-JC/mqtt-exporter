@@ -27,6 +27,42 @@ def subscribe(client, userdata, flags, connection_result):  # pylint: disable=W0
     client.subscribe(TOPIC)
 
 
+def iterate(item, topic, prefix=""):
+    """Iterate over a dict adding the metrics to prometheus."""
+    for metric, value in item:
+        # check if metric is another dict
+        if isinstance(value, dict):
+            LOG.debug("found dict in metric")
+            iterate(value.items(), topic, f"{metric}_")
+
+        # try to convert booleans to numeric values
+        if isinstance(value, str):
+            val = str(value).lower()
+            if val in ("on", "true"):
+                value = 1
+            elif val in ("off", "false"):
+                value = 0
+
+        # we only expose numeric values
+        try:
+            metric_value = float(value)
+        except (ValueError, TypeError):
+            LOG.debug("Failed to convert %s: %s", metric, value)
+            continue
+
+        # create metric if does not exist
+        prom_metric_name = f"{PREFIX}{prefix}{metric}"
+        if not prom_metrics.get(prom_metric_name):
+            prom_metrics[prom_metric_name] = Gauge(
+                prom_metric_name, "metric generated from MQTT message.", [TOPIC_LABEL]
+            )
+            LOG.info("creating prometheus metric: %s", prom_metric_name)
+
+        # expose the metric to prometheus
+        prom_metrics[prom_metric_name].labels(**{TOPIC_LABEL: topic}).set(metric_value)
+        LOG.debug("new value for %s: %s", prom_metric_name, metric_value)
+
+
 def expose_metrics(client, userdata, msg):  # pylint: disable=W0613
     """Expose metrics to prometheus when a message has been published (callback)."""
     try:
@@ -41,25 +77,7 @@ def expose_metrics(client, userdata, msg):  # pylint: disable=W0613
         LOG.debug('unexpected payload format: "%s"', payload)
         return
 
-    for metric, value in payload.items():
-        # we only expose numeric values
-        try:
-            metric_value = float(value)
-        except (ValueError, TypeError):
-            LOG.debug("Failed to convert %s: %s", metric, value)
-            continue
-
-        # create metric if does not exist
-        prom_metric_name = f"{PREFIX}{metric}"
-        if not prom_metrics.get(prom_metric_name):
-            prom_metrics[prom_metric_name] = Gauge(
-                prom_metric_name, "metric generated from MQTT message.", [TOPIC_LABEL]
-            )
-            LOG.info("creating prometheus metric: %s", prom_metric_name)
-
-        # expose the metric to prometheus
-        prom_metrics[prom_metric_name].labels(**{TOPIC_LABEL: topic}).set(metric_value)
-        LOG.debug("new value for %s: %s", prom_metric_name, metric_value)
+    iterate(payload.items(), topic, "")
     # Now inc a counter for the message count
     prom_msg_counter.labels(**{TOPIC_LABEL: topic}).inc()
 
